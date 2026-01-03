@@ -7,7 +7,6 @@ from numba import prange
 from numba import njit as _njit
 
 from .tensor_data import (
-    MAX_DIMS,
     broadcast_index,
     index_to_position,
     shape_broadcast,
@@ -139,6 +138,20 @@ class FastOps(TensorOps):
 # Implementations
 
 
+@njit
+def is_stride_aligned(
+    out_shape: Shape,
+    out_strides: Strides,
+    in_shape: Shape,
+    in_strides: Strides,
+) -> bool:
+    return (
+        len(out_strides) == len(in_strides)
+        and (out_strides == in_strides).all()
+        and (out_shape == in_shape).all()
+    )
+
+
 def tensor_map(
     fn: Callable[[float], float],
 ) -> Callable[[Storage, Shape, Strides, Storage, Shape, Strides], None]:
@@ -168,7 +181,27 @@ def tensor_map(
         in_shape: Shape,
         in_strides: Strides,
     ) -> None:
-        raise NotImplementedError("Need to include this file from past assignment.")
+        if is_stride_aligned(out_shape, out_strides, in_shape, in_strides):
+            # Fast path: storage layouts match exactly — operate directly on
+            # flattened storage without index conversion.
+            for i in prange(len(out)):
+                out[i] = fn(in_storage[i])
+        else:
+            for i in prange(len(out)):
+                out_index: Index = np.empty(len(out_shape), dtype=np.int32)
+                in_index: Index = np.empty(len(in_shape), dtype=np.int32)
+                # Convert ordinal to index in out_shape
+                to_index(i, out_shape, out_index)
+
+                # Map index to input shape (broadcasting)
+                broadcast_index(out_index, out_shape, in_shape, in_index)
+
+                # Convert indices to storage positions
+                out_pos = index_to_position(out_index, out_strides)
+                in_pos = index_to_position(in_index, in_strides)
+
+                # Apply function
+                out[out_pos] = fn(in_storage[in_pos])
 
     return njit(_map, parallel=True)  # type: ignore
 
@@ -207,7 +240,33 @@ def tensor_zip(
         b_shape: Shape,
         b_strides: Strides,
     ) -> None:
-        raise NotImplementedError("Need to include this file from past assignment.")
+        if is_stride_aligned(
+            out_shape, out_strides, a_shape, a_strides
+        ) and is_stride_aligned(out_shape, out_strides, b_shape, b_strides):
+            # All layouts identical: operate directly on flattened storage.
+            for i in prange(len(out)):
+                out[i] = fn(a_storage[i], b_storage[i])
+        else:
+            for i in prange(len(out)):
+                out_index: Index = np.empty(len(out_shape), dtype=np.int32)
+                a_index: Index = np.empty(len(a_shape), dtype=np.int32)
+                b_index: Index = np.empty(len(b_shape), dtype=np.int32)
+                # Convert ordinal to index in out_shape
+                to_index(i, out_shape, out_index)
+
+                # Map index to a_shape (broadcasting)
+                broadcast_index(out_index, out_shape, a_shape, a_index)
+
+                # Map index to b_shape (broadcasting)
+                broadcast_index(out_index, out_shape, b_shape, b_index)
+
+                # Convert indices to storage positions
+                out_pos = index_to_position(out_index, out_strides)
+                a_pos = index_to_position(a_index, a_strides)
+                b_pos = index_to_position(b_index, b_strides)
+
+                # Apply function
+                out[out_pos] = fn(a_storage[a_pos], b_storage[b_pos])
 
     return njit(_zip, parallel=True)  # type: ignore
 
@@ -242,7 +301,19 @@ def tensor_reduce(
         a_strides: Strides,
         reduce_dim: int,
     ) -> None:
-        raise NotImplementedError("Need to include this file from past assignment.")
+        for i in prange(len(out)):
+            out_index: Index = np.empty(len(out_shape), dtype=np.int32)
+            to_index(i, out_shape, out_index)
+            out_pos = index_to_position(out_index, out_strides)
+
+            # The base position in a is the position corresponding to out_index
+            # (which has 0 at reduce_dim)
+            base_a_pos = index_to_position(out_index, a_strides)
+
+            # Iterate over the reduction dimension
+            for j in range(a_shape[reduce_dim]):
+                a_pos = base_a_pos + j * a_strides[reduce_dim]
+                out[out_pos] = fn(float(out[out_pos]), float(a_storage[a_pos]))
 
     return njit(_reduce, parallel=True)  # type: ignore
 
@@ -290,10 +361,40 @@ def _tensor_matrix_multiply(
         None : Fills in `out`
 
     """
+    # Compute the batch stride for A and B. If the batch dimension is 1
+    # (i.e. the tensor is broadcast across batches) use a zero stride so
+    # the same matrix is reused for every output batch.
     a_batch_stride = a_strides[0] if a_shape[0] > 1 else 0
     b_batch_stride = b_strides[0] if b_shape[0] > 1 else 0
 
-    raise NotImplementedError("Need to include this file from past assignment.")
+    # Loop over batches, then rows (i) and columns (j) of the output.
+    # The inner loop over k computes the dot-product for out[batch, i, j].
+    for batch in prange(out_shape[0]):
+        for i in range(out_shape[-2]):
+            for j in range(out_shape[-1]):
+                acc = 0.0
+                # Sum over the shared dimension k (columns of A, rows of B).
+                for k in range(a_shape[-1]):
+                    # Compute flattened storage offsets directly using strides:
+                    # a element at [batch, i, k] -> batch*a_batch_stride + i*a_strides[-2] + k*a_strides[-1]
+                    # b element at [batch, k, j] -> batch*b_batch_stride + k*b_strides[-2] + j*b_strides[-1]
+                    acc += (
+                        a_storage[
+                            batch * a_batch_stride
+                            + i * a_strides[-2]
+                            + k * a_strides[-1]
+                        ]
+                        * b_storage[
+                            batch * b_batch_stride
+                            + k * b_strides[-2]
+                            + j * b_strides[-1]
+                        ]
+                    )
+                # Write the accumulated dot product into the flattened out storage
+                # at position corresponding to [batch, i, j].
+                out[
+                    batch * out_strides[0] + i * out_strides[-2] + j * out_strides[-1]
+                ] = acc
 
 
 tensor_matrix_multiply = njit(_tensor_matrix_multiply, parallel=True)

@@ -1,8 +1,7 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Tuple, Protocol
+from typing import Any, Iterable, Tuple
 
+from typing_extensions import Protocol
 
 # ## Task 1.1
 # Central Difference calculation
@@ -25,26 +24,34 @@ def central_difference(f: Any, *vals: Any, arg: int = 0, epsilon: float = 1e-6) 
         An approximation of $f'_i(x_0, \ldots, x_{n-1})$
 
     """
-    raise NotImplementedError("Need to include this file from past assignment.")
+    forward = f(*vals[:arg], vals[arg] + epsilon, *vals[arg + 1 :])
+    backward = f(*vals[:arg], vals[arg] - epsilon, *vals[arg + 1 :])
+    return (forward - backward) / (2 * epsilon)
 
 
 variable_count = 1
 
 
 class Variable(Protocol):
-    def accumulate_derivative(self, x: Any) -> None: ...
+    def accumulate_derivative(self, x: Any) -> None:
+        pass
 
     @property
-    def unique_id(self) -> int: ...
+    def unique_id(self) -> int:
+        pass
 
-    def is_leaf(self) -> bool: ...
+    def is_leaf(self) -> bool:
+        pass
 
-    def is_constant(self) -> bool: ...
+    def is_constant(self) -> bool:
+        pass
 
     @property
-    def parents(self) -> Iterable["Variable"]: ...
+    def parents(self) -> Iterable["Variable"]:
+        pass
 
-    def chain_rule(self, d_output: Any) -> Iterable[Tuple[Variable, Any]]: ...
+    def chain_rule(self, d_output: Any) -> Iterable[Tuple["Variable", Any]]:
+        pass
 
 
 def topological_sort(variable: Variable) -> Iterable[Variable]:
@@ -59,7 +66,28 @@ def topological_sort(variable: Variable) -> Iterable[Variable]:
         Non-constant Variables in topological order starting from the right.
 
     """
-    raise NotImplementedError("Need to include this file from past assignment.")
+    result = []
+    visited = set()
+
+    def dfs(var: Variable) -> None:
+        """Depth-first search to visit all nodes in the computation graph."""
+        # Skip if already visited or if it's a constant
+        if var.unique_id in visited or var.is_constant():
+            return
+
+        visited.add(var.unique_id)
+
+        # Visit all parent nodes first
+        for parent in var.parents:
+            dfs(parent)
+
+        # Add current node after visiting all parents (post-order)
+        result.append(var)
+
+    dfs(variable)
+
+    # Return in reverse order (output to inputs)
+    return reversed(result)
 
 
 def backpropagate(variable: Variable, deriv: Any) -> None:
@@ -74,7 +102,32 @@ def backpropagate(variable: Variable, deriv: Any) -> None:
     No return. Should write to its results to the derivative values of each leaf through `accumulate_derivative`.
 
     """
-    raise NotImplementedError("Need to include this file from past assignment.")
+    # Get variables in topological order (from output to inputs)
+    sorted_vars = topological_sort(variable)
+
+    # Dictionary to accumulate derivatives for each variable
+    derivatives = {}
+    derivatives[variable.unique_id] = deriv
+
+    # Process each variable in topological order
+    for var in sorted_vars:
+        # Get the accumulated derivative for this variable
+        if var.unique_id not in derivatives:
+            continue
+
+        d_var = derivatives[var.unique_id]
+
+        # If it's a leaf variable, accumulate the derivative
+        if var.is_leaf():
+            var.accumulate_derivative(d_var)
+        else:
+            # Apply chain rule to compute derivatives for parent variables
+            for parent, d_parent in var.chain_rule(d_var):
+                # Accumulate derivatives (handle variables used multiple times)
+                if parent.unique_id in derivatives:
+                    derivatives[parent.unique_id] += d_parent
+                else:
+                    derivatives[parent.unique_id] = d_parent
 
 
 @dataclass

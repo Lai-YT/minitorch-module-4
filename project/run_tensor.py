@@ -4,12 +4,52 @@ Be sure you have minitorch installed in you Virtual Env.
 """
 
 import minitorch
+from minitorch.tensor import Tensor
 
-# Use this function to make a random parameter in
-# your module.
+
 def RParam(*shape):
     r = 2 * (minitorch.rand(shape) - 0.5)
     return minitorch.Parameter(r)
+
+
+class Network(minitorch.Module):
+    def __init__(self, hidden_layers):
+        super().__init__()
+
+        # Submodules
+        self.layer1 = Linear(2, hidden_layers)
+        self.layer2 = Linear(hidden_layers, hidden_layers)
+        self.layer3 = Linear(hidden_layers, 1)
+
+    def forward(self, x):
+        middle = self.layer1.forward(x).relu()
+        end = self.layer2.forward(middle).relu()
+        return self.layer3.forward(end).sigmoid()
+
+
+class Linear(minitorch.Module):
+    def __init__(self, in_size, out_size):
+        super().__init__()
+        self.weights = RParam(in_size, out_size)
+        self.bias = RParam(out_size)
+        self.out_size = out_size
+
+    def forward(self, x: Tensor):
+        batch, in_size = x.shape
+        # View weights as (1, in_size, out_size)
+        weights_view = self.weights.value.view(1, in_size, self.out_size)
+
+        # View input as (batch, in_size, 1)
+        x_view = x.view(batch, in_size, 1)
+
+        # Broadcast multiply -> (batch, in_size, out_size)
+        temp = weights_view * x_view
+
+        # Sum over input dimension -> (batch, out_size)
+        temp_sum = temp.sum(1).view(batch, self.out_size)
+
+        # Add bias -> (batch, out_size)
+        return temp_sum + self.bias.value.view(1, self.out_size)
 
 
 def default_log_fn(epoch, total_loss, correct, losses):
@@ -28,6 +68,7 @@ class TensorTrain:
         return self.model.forward(minitorch.tensor(X))
 
     def train(self, data, learning_rate, max_epochs=500, log_fn=default_log_fn):
+
         self.learning_rate = learning_rate
         self.max_epochs = max_epochs
         self.model = Network(self.hidden_layers)
