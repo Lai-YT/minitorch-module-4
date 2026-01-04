@@ -1,14 +1,11 @@
 from typing import Tuple, TypeVar, Any
 
-import numpy as np
 from numba import prange
 from numba import njit as _njit
 
 from .autodiff import Context
 from .tensor import Tensor
 from .tensor_data import (
-    MAX_DIMS,
-    Index,
     Shape,
     Strides,
     Storage,
@@ -89,9 +86,39 @@ def _tensor_conv1d(
     )
     s1 = input_strides
     s2 = weight_strides
+    # Strides for each dimension
+    s10, s11, s12 = s1
+    s20, s21, s22 = s2
+    out_s0, out_s1, out_s2 = out_strides
 
-    # TODO: Implement for Task 4.1.
-    raise NotImplementedError("Need to implement for Task 4.1")
+    # Parallelize over batch and outgoing channels
+    for b in prange(batch):
+        for oc in prange(out_channels):
+            for ow in range(out_width):
+                # Calculate the output position
+                out_pos = b * out_s0 + oc * out_s1 + ow * out_s2
+
+                # Accumulate the convolution result
+                acc = 0.0
+                for ic in range(in_channels):
+                    # Base positions for input and weight channels
+                    in_base = b * s10 + ic * s11
+                    w_base = oc * s20 + ic * s21
+
+                    for k in range(kw):
+                        # Determine input index based on 'reverse' flag
+                        # If reverse is False: weight is anchored left (input_index = ow + k)
+                        # If reverse is True: weight is anchored right (input_index = ow - k)
+                        iw = ow + (k if not reverse else -k)
+
+                        # Check if the input index is within bounds (zero-padding)
+                        if 0 <= iw < width:
+                            in_pos = in_base + iw * s12
+                            w_pos = w_base + k * s22
+                            acc += input[in_pos] * weight[w_pos]
+
+                # Store the accumulated result in the output storage
+                out[out_pos] = acc
 
 
 tensor_conv1d = njit(_tensor_conv1d, parallel=True)
