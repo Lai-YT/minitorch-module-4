@@ -230,7 +230,7 @@ def _tensor_conv2d(
         reverse (bool): anchor weight at top-left or bottom-right
 
     """
-    batch_, out_channels, _, _ = out_shape
+    batch_, out_channels, out_h, out_w = out_shape
     batch, in_channels, height, width = input_shape
     out_channels_, in_channels_, kh, kw = weight_shape
 
@@ -240,14 +240,47 @@ def _tensor_conv2d(
         and out_channels == out_channels_
     )
 
-    s1 = input_strides
-    s2 = weight_strides
-    # inners
-    s10, s11, s12, s13 = s1[0], s1[1], s1[2], s1[3]
-    s20, s21, s22, s23 = s2[0], s2[1], s2[2], s2[3]
+    # Strides for each dimension
+    s10, s11, s12, s13 = input_strides
+    s20, s21, s22, s23 = weight_strides
+    out_s0, out_s1, out_s2, out_s3 = out_strides
 
-    # TODO: Implement for Task 4.2.
-    raise NotImplementedError("Need to implement for Task 4.2")
+    # Iterate over each element in the output tensor
+    # Parallelize over batch and outgoing channels
+    for b in prange(batch):
+        for oc in prange(out_channels):
+            for oh in range(out_h):
+                for ow in range(out_w):
+                    # Calculate the output position in storage
+                    out_pos = b * out_s0 + oc * out_s1 + oh * out_s2 + ow * out_s3
+
+                    # Accumulate the 2D convolution result
+                    acc = 0.0
+                    for ic in range(in_channels):
+                        # Base positions for input and weight channels
+                        in_base = b * s10 + ic * s11
+                        w_base = oc * s20 + ic * s21
+
+                        for kh_idx in range(kh):
+                            for kw_idx in range(kw):
+                                # Determine input height and width indices based on 'reverse' flag
+                                # If reverse is False: weight is anchored top-left (h + kh, w + kw)
+                                # If reverse is True: weight is anchored bottom-right (h - kh, w - kw)
+                                if not reverse:
+                                    ih = oh + kh_idx
+                                    iw = ow + kw_idx
+                                else:
+                                    ih = oh - kh_idx
+                                    iw = ow - kw_idx
+
+                                # Check if the input indices are within bounds (zero-padding)
+                                if 0 <= ih < height and 0 <= iw < width:
+                                    in_pos = in_base + ih * s12 + iw * s13
+                                    w_pos = w_base + kh_idx * s22 + kw_idx * s23
+                                    acc += input[in_pos] * weight[w_pos]
+
+                    # Store the accumulated result in the output storage
+                    out[out_pos] = acc
 
 
 tensor_conv2d = njit(_tensor_conv2d, parallel=True, fastmath=True)
